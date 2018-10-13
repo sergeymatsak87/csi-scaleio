@@ -1,133 +1,265 @@
+// This file was copied from Go stdlib "net/pipe.go"
+// and modified in order to optimally support:
+//
+//     * Buffered writes
+//     * Custom local and remote address values
+//     * Error values that follow net.Conn's rules regarding
+//       net.OpError
+//
+// The above features could be implemented using the "net.Conn" values
+// returned from the function "net.Pipe", but much of the same code
+// would need to be duplicated regarding deadlines, done semantics, etc.
+// Using the private "pipe" struct as the basis of a new, composite type
+// is much more performant.
+//
+// FYI, the reason a new, composite type is used instead of modifying
+// the existing type, "pipe", is to make it easier to replace this
+// file with whatever changes Go stdlib make make to "net/pipe.go" in
+// the future.
+//
+// This file is a Golang stdlib type and so the Go license is included:
+//
+//     Copyright 2010 The Go Authors. All rights reserved.
+//     Use of this source code is governed by a BSD-style
+//     license that can be found in the LICENSE file.
+
 package memconn
 
 import (
-	"errors"
-	"fmt"
+	"io"
 	"net"
 	"sync"
 	"time"
 )
 
-// ErrTimeout occurs when a read or write operation times out with respect
-// to the connection's deadline settings.
-var ErrTimeout = errors.New("i/o timeout")
+// pipeDeadline is an abstraction for handling timeouts.
+type pipeDeadline struct {
+	mu     sync.Mutex // Guards timer and cancel
+	timer  *time.Timer
+	cancel chan struct{} // Must be non-nil
+}
 
-func pipe(addr *addr, pool *sync.Pool) (net.Conn, net.Conn) {
-	c1, c2 := net.Pipe()
-	return &pipeConn{
-			Conn: c1,
-			addr: addr,
-			pool: pool,
-		}, &pipeConn{
-			Conn: c2,
-			addr: addr,
-			pool: pool,
+func makePipeDeadline() pipeDeadline {
+	return pipeDeadline{cancel: make(chan struct{})}
+}
+
+// set sets the point in time when the deadline will time out.
+// A timeout event is signaled by closing the channel returned by waiter.
+// Once a timeout has occurred, the deadline can be refreshed by specifying a
+// t value in the future.
+//
+// A zero value for t prevents timeout.
+func (d *pipeDeadline) set(t time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if d.timer != nil && !d.timer.Stop() {
+		<-d.cancel // Wait for the timer callback to finish and close cancel
+	}
+	d.timer = nil
+
+	// Time is zero, then there is no deadline.
+	closed := isClosedChan(d.cancel)
+	if t.IsZero() {
+		if closed {
+			d.cancel = make(chan struct{})
 		}
-}
-
-type pipeConn struct {
-	net.Conn
-	addr *addr
-	pool *sync.Pool
-	rd   time.Time
-	wd   time.Time
-}
-
-func (p *pipeConn) SetDeadline(t time.Time) error {
-	p.SetReadDeadline(t)
-	p.SetWriteDeadline(t)
-	return nil
-}
-
-func (p *pipeConn) SetReadDeadline(t time.Time) error {
-	if !t.Before(time.Now()) {
-		p.rd = t
-	}
-	return nil
-}
-
-func (p *pipeConn) SetWriteDeadline(t time.Time) error {
-	if !t.Before(time.Now()) {
-		p.wd = t
-	}
-	return nil
-}
-
-const (
-	opRead  = "read"
-	opWrite = "write"
-)
-
-func (p *pipeConn) Read(data []byte) (int, error) {
-	return p.doReadOrWrite(opRead, data)
-}
-
-func (p *pipeConn) Write(data []byte) (int, error) {
-	return p.doReadOrWrite(opWrite, data)
-}
-
-func (p *pipeConn) doReadOrWrite(op string, data []byte) (int, error) {
-
-	deadline := p.rd
-	if op == opWrite {
-		deadline = p.wd
+		return
 	}
 
-	// If there is no deadline then bypass the timeout logic.
-	if deadline.IsZero() {
-		if op == opRead {
-			return p.Conn.Read(data)
+	// Time in the future, setup a timer to cancel in the future.
+	if dur := time.Until(t); dur > 0 {
+		if closed {
+			d.cancel = make(chan struct{})
 		}
-		return p.Conn.Write(data)
+		d.timer = time.AfterFunc(dur, func() {
+			close(d.cancel)
+		})
+		return
 	}
 
-	// Create a timer only if the deadline is not zero and does
-	// not occur before the current time.
-	timeout := time.NewTimer(deadline.Sub(time.Now()))
-	defer timeout.Stop()
-
-	c, ok := p.pool.Get().(chan interface{})
-	if !ok {
-		// The channel must be buffered with a length of 1 or else
-		// the send operations in the below goroutine will block
-		// forever, preventing the goroutine from exiting, if the
-		// IO operation times out.
-		c = make(chan interface{}, 1)
+	// Time in the past, so close immediately.
+	if !closed {
+		close(d.cancel)
 	}
+}
 
-	go func() {
-		var n int
-		var err error
-		if op == opRead {
-			n, err = p.Conn.Read(data)
-		} else {
-			n, err = p.Conn.Write(data)
-		}
-		if err != nil {
-			c <- err
-		} else {
-			c <- n
-		}
-	}()
+// wait returns a channel that is closed when the deadline is exceeded.
+func (d *pipeDeadline) wait() chan struct{} {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.cancel
+}
+
+func isClosedChan(c <-chan struct{}) bool {
+	select {
+	case <-c:
+		return true
+	default:
+		return false
+	}
+}
+
+type timeoutError struct{}
+
+func (timeoutError) Error() string   { return "deadline exceeded" }
+func (timeoutError) Timeout() bool   { return true }
+func (timeoutError) Temporary() bool { return true }
+
+type pipeAddr struct{}
+
+func (pipeAddr) Network() string { return "pipe" }
+func (pipeAddr) String() string  { return "pipe" }
+
+type pipe struct {
+	wrMu sync.Mutex // Serialize Write operations
+
+	// Used by local Read to interact with remote Write.
+	// Successful receive on rdRx is always followed by send on rdTx.
+	rdRx <-chan []byte
+	rdTx chan<- int
+
+	// Used by local Write to interact with remote Read.
+	// Successful send on wrTx is always followed by receive on wrRx.
+	wrTx chan<- []byte
+	wrRx <-chan int
+
+	once       sync.Once // Protects closing localDone
+	localDone  chan struct{}
+	remoteDone <-chan struct{}
+
+	readDeadline  pipeDeadline
+	writeDeadline pipeDeadline
+}
+
+// Pipe creates a synchronous, in-memory, full duplex
+// network connection; both ends implement the Conn interface.
+// Reads on one end are matched with writes on the other,
+// copying data directly between the two; there is no internal
+// buffering.
+func Pipe() (net.Conn, net.Conn) {
+	cb1 := make(chan []byte)
+	cb2 := make(chan []byte)
+	cn1 := make(chan int)
+	cn2 := make(chan int)
+	done1 := make(chan struct{})
+	done2 := make(chan struct{})
+
+	p1 := &pipe{
+		rdRx: cb1, rdTx: cn1,
+		wrTx: cb2, wrRx: cn2,
+		localDone: done1, remoteDone: done2,
+		readDeadline:  makePipeDeadline(),
+		writeDeadline: makePipeDeadline(),
+	}
+	p2 := &pipe{
+		rdRx: cb2, rdTx: cn2,
+		wrTx: cb1, wrRx: cn1,
+		localDone: done2, remoteDone: done1,
+		readDeadline:  makePipeDeadline(),
+		writeDeadline: makePipeDeadline(),
+	}
+	return p1, p2
+}
+
+func (*pipe) LocalAddr() net.Addr  { return pipeAddr{} }
+func (*pipe) RemoteAddr() net.Addr { return pipeAddr{} }
+
+func (p *pipe) Read(b []byte) (int, error) {
+	n, err := p.read(b)
+	if err != nil && err != io.EOF && err != io.ErrClosedPipe {
+		err = &net.OpError{Op: "read", Net: "pipe", Err: err}
+	}
+	return n, err
+}
+
+func (p *pipe) read(b []byte) (n int, err error) {
+	switch {
+	case isClosedChan(p.localDone):
+		return 0, io.ErrClosedPipe
+	case isClosedChan(p.remoteDone):
+		return 0, io.EOF
+	case isClosedChan(p.readDeadline.wait()):
+		return 0, timeoutError{}
+	}
 
 	select {
-	case <-timeout.C:
-		return 0, &net.OpError{
-			Op:     op,
-			Net:    network,
-			Source: p.addr,
-			Addr:   p.addr,
-			Err:    ErrTimeout,
-		}
-	case i := <-c:
-		p.pool.Put(c)
-		switch ti := i.(type) {
-		case int:
-			return ti, nil
-		case error:
-			return 0, ti
-		default:
-			panic(fmt.Sprintf("memconn: invalid type: %[1]T %[1]v", i))
+	case bw := <-p.rdRx:
+		nr := copy(b, bw)
+		p.rdTx <- nr
+		return nr, nil
+	case <-p.localDone:
+		return 0, io.ErrClosedPipe
+	case <-p.remoteDone:
+		return 0, io.EOF
+	case <-p.readDeadline.wait():
+		return 0, timeoutError{}
+	}
+}
+
+func (p *pipe) Write(b []byte) (int, error) {
+	n, err := p.write(b)
+	if err != nil && err != io.ErrClosedPipe {
+		err = &net.OpError{Op: "write", Net: "pipe", Err: err}
+	}
+	return n, err
+}
+
+func (p *pipe) write(b []byte) (n int, err error) {
+	switch {
+	case isClosedChan(p.localDone):
+		return 0, io.ErrClosedPipe
+	case isClosedChan(p.remoteDone):
+		return 0, io.ErrClosedPipe
+	case isClosedChan(p.writeDeadline.wait()):
+		return 0, timeoutError{}
+	}
+
+	p.wrMu.Lock() // Ensure entirety of b is written together
+	defer p.wrMu.Unlock()
+	for once := true; once || len(b) > 0; once = false {
+		select {
+		case p.wrTx <- b:
+			nw := <-p.wrRx
+			b = b[nw:]
+			n += nw
+		case <-p.localDone:
+			return n, io.ErrClosedPipe
+		case <-p.remoteDone:
+			return n, io.ErrClosedPipe
+		case <-p.writeDeadline.wait():
+			return n, timeoutError{}
 		}
 	}
+	return n, nil
+}
+
+func (p *pipe) SetDeadline(t time.Time) error {
+	if isClosedChan(p.localDone) || isClosedChan(p.remoteDone) {
+		return io.ErrClosedPipe
+	}
+	p.readDeadline.set(t)
+	p.writeDeadline.set(t)
+	return nil
+}
+
+func (p *pipe) SetReadDeadline(t time.Time) error {
+	if isClosedChan(p.localDone) || isClosedChan(p.remoteDone) {
+		return io.ErrClosedPipe
+	}
+	p.readDeadline.set(t)
+	return nil
+}
+
+func (p *pipe) SetWriteDeadline(t time.Time) error {
+	if isClosedChan(p.localDone) || isClosedChan(p.remoteDone) {
+		return io.ErrClosedPipe
+	}
+	p.writeDeadline.set(t)
+	return nil
+}
+
+func (p *pipe) Close() error {
+	p.once.Do(func() { close(p.localDone) })
+	return nil
 }
