@@ -755,7 +755,7 @@ func (s *service) controllerProbe(ctx context.Context) error {
 		s.adminClient = c
 	}
 
-	if s.adminClient.GetToken() == "" {
+	if s.adminClient.Token == "" {
 		_, err := s.adminClient.Authenticate(&goscaleio.ConfigConnect{
 			Endpoint: s.opts.Endpoint,
 			Username: s.opts.User,
