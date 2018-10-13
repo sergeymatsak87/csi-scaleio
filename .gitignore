@@ -1,1 +1,3 @@
 csi-scaleio
+*.iml
+.idea
