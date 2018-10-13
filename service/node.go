@@ -177,3 +177,23 @@ func (s *service) NodeGetCapabilities(
 
 	return &csi.NodeGetCapabilitiesResponse{}, nil
 }
+
+func (s *service) NodeGetInfo(
+	ctx context.Context,
+	req *csi.NodeGetInfoRequest) (
+	*csi.NodeGetInfoResponse, error) {
+
+	if s.opts.SdcGUID == "" {
+		if !s.opts.AutoProbe {
+			return nil, status.Error(codes.FailedPrecondition,
+				"Unable to get Node ID. Either it is not configured, "+
+					"or Node Service has not been probed")
+		}
+		if err := s.nodeProbe(ctx); err != nil {
+			return nil, err
+		}
+	}
+	return &csi.NodeGetInfoResponse{
+		NodeId: s.opts.SdcGUID,
+	}, nil
+}
