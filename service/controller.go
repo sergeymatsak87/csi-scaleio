@@ -755,7 +755,7 @@ func (s *service) controllerProbe(ctx context.Context) error {
 		s.adminClient = c
 	}
 
-	if s.adminClient.Token == "" {
+	if s.adminClient.GetToken() == "" {
 		_, err := s.adminClient.Authenticate(&goscaleio.ConfigConnect{
 			Endpoint: s.opts.Endpoint,
 			Username: s.opts.User,
@@ -798,25 +798,25 @@ func (s *service) requireProbe(ctx context.Context) error {
 }
 
 func (s *service) CreateSnapshot(
-	ctx context.Context,
-	req *csi.CreateSnapshotRequest) (
-	*csi.CreateSnapshotResponse, error) {
+        ctx context.Context,
+        req *csi.CreateSnapshotRequest) (
+        *csi.CreateSnapshotResponse, error) {
 
-	return nil, status.Error(codes.Unimplemented, "")
+        return nil, status.Error(codes.Unimplemented, "")
 }
 
 func (s *service) DeleteSnapshot(
-	ctx context.Context,
-	req *csi.DeleteSnapshotRequest) (
-	*csi.DeleteSnapshotResponse, error) {
+        ctx context.Context,
+        req *csi.DeleteSnapshotRequest) (
+        *csi.DeleteSnapshotResponse, error) {
 
-	return nil, status.Error(codes.Unimplemented, "")
+        return nil, status.Error(codes.Unimplemented, "")
 }
 
 func (s *service) ListSnapshots(
-	ctx context.Context,
-	req *csi.ListSnapshotsRequest) (
-	*csi.ListSnapshotsResponse, error) {
+        ctx context.Context,
+        req *csi.ListSnapshotsRequest) (
+        *csi.ListSnapshotsResponse, error) {
 
-	return nil, status.Error(codes.Unimplemented, "")
+        return nil, status.Error(codes.Unimplemented, "")
 }

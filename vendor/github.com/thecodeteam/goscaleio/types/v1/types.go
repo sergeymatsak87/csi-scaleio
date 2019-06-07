@@ -1,11 +1,13 @@
 package goscaleio
 
 type Error struct {
-	Message                 string `xml:"message,attr"`
-	MajorErrorCode          int    `xml:"majorErrorCode,attr"`
-	MinorErrorCode          string `xml:"minorErrorCode,attr"`
-	VendorSpecificErrorCode string `xml:"vendorSpecificErrorCode,attr,omitempty"`
-	StackTrace              string `xml:"stackTrace,attr,omitempty"`
+	Message        string `json:"message"`
+	HTTPStatusCode int    `json:"httpStatusCode"`
+	ErrorCode      int    `json:"errorCode"`
+}
+
+func (e Error) Error() string {
+	return e.Message
 }
 
 // type session struct {
@@ -359,6 +361,12 @@ type UnmapVolumeSdcParam struct {
 	SdcID                string `json:"sdcId,omitempty"`
 	IgnoreScsiInitiators string `json:"ignoreScsiInitiators,omitempty"`
 	AllSdcs              string `json:"allSdcs,omitempty"`
+}
+
+type SetMappedSdcLimitsParam struct {
+	SdcID                string `json:"sdcId,omitempty"`
+	BandwidthLimitInKbps string `json:"bandwidthLimitInKbps,omitempty"`
+	IopsLimit            string `json:"iopsLimit,omitempty"`
 }
 
 type SnapshotDef struct {

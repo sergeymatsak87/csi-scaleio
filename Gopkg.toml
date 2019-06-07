@@ -10,5 +10,4 @@
 
 [[constraint]]
   name = "github.com/rexray/gocsi"
-  revision = "47f4bd656ddea05ff2d9c85cc55c6b9eafcf960e"
-
+  version = "0.4.0"

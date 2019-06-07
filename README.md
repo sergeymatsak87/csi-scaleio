@@ -1,4 +1,6 @@
-# CSI plugin for ScaleIO [![Build Status](http://travis-ci.org/thecodeteam/csi-scaleio.svg?branch=master)]
+# CSI plugin for ScaleIO [csi-scaleio](https://github.com/thecodeteam/csi-scaleio)
+
+## Inherited from [csi-scaleio](https://github.com/thecodeteam/csi-scaleio) v0.1.0 and adapted to be compatible with [CSI](https://github.com/container-storage-interface/spec) v0.3.0
 
 ## Description
 CSI-ScaleIO is a Container Storage Interface ([CSI](https://github.com/container-storage-interface/spec))
@@ -170,3 +172,4 @@ In general, volumes should be formatted with xfs or ext4.
 For any questions or concerns please file an issue with the
 [csi-scaleio](https://github.com/thecodeteam/csi-scaleio/issues) project or join
 the Slack channel #project-rexray at codecommunity.slack.com.
+=======

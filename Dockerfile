@@ -1,7 +1,9 @@
 FROM golang:1.10 AS builder
 
 COPY . /go/src/github.com/thecodeteam/csi-scaleio
+
 WORKDIR /go/src/github.com/thecodeteam/csi-scaleio
+
 RUN go build
 
 FROM centos:7
